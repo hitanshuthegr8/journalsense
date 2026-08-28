@@ -125,14 +125,33 @@ def extract_key_phrases(text, top_k=5):
     try:
         vec = CountVectorizer(ngram_range=(2, 3), stop_words="english", min_df=1)
         counts = vec.fit_transform([text])
-        ranked = sorted(
-            zip(vec.get_feature_names_out(), counts.toarray()[0]),
-            key=lambda kv: (-kv[1], kv[0]),
-        )
-        return [phrase for phrase, count in ranked[:top_k] if count > 0]
     except ValueError:
         # Raised when the text is empty or contains only stopwords.
         return []
+
+    ranked = sorted(
+        zip(vec.get_feature_names_out(), counts.toarray()[0]),
+        key=lambda kv: (-kv[1], kv[0]),
+    )
+
+    # Bigrams and trigrams drawn from the same span overlap heavily, so a naive
+    # top-k reads as the same phrase repeated: "data visualization",
+    # "data visualization methods", "visualization methods". Keep the first
+    # (highest-count) phrase from each group and skip any later phrase whose words
+    # are a subset or superset of one already chosen.
+    chosen: list[str] = []
+    chosen_words: list[set] = []
+    for phrase, count in ranked:
+        if count == 0:
+            continue
+        words = set(phrase.split())
+        if any(words <= seen or seen <= words for seen in chosen_words):
+            continue
+        chosen.append(phrase)
+        chosen_words.append(words)
+        if len(chosen) >= top_k:
+            break
+    return chosen
 
 
 # ------------------------------------------------------------------
