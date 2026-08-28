@@ -1,0 +1,61 @@
+{
+  "model_load_seconds": 51.6,
+  "embedding_dim": 768,
+  "index_build_seconds_batch32": 80.1,
+  "index_docs_per_sec_batch32": 12.5,
+  "batching_ablation_200docs": {
+    "batch1_s": 14.28,
+    "batch32_s": 12.53,
+    "speedup_x": 1.14
+  },
+  "query_latency_cold_ms": {
+    "p50": 153.1,
+    "p95": 188.9,
+    "mean": 145.0
+  },
+  "query_latency_warm_ms": {
+    "p50": 0.1,
+    "p95": 0.1,
+    "mean": 0.1
+  },
+  "cache_speedup_x": 1271.6,
+  "faiss_scan_only_ms": {
+    "p50": 0.1,
+    "p95": 0.1,
+    "mean": 0.1
+  },
+  "dense_specter_enriched": {
+    "recall@1": 12.1,
+    "recall@5": 37.6,
+    "recall@10": 51.1,
+    "recall@20": 63.8,
+    "MRR@10": 0.233
+  },
+  "dense_specter_titleonly_ORIGINAL": {
+    "recall@1": 12.5,
+    "recall@5": 30.7,
+    "recall@10": 39.2,
+    "recall@20": 50.4,
+    "MRR@10": 0.203
+  },
+  "lexical_tfidf_enriched": {
+    "recall@1": 11.6,
+    "recall@5": 30.7,
+    "recall@10": 40.0,
+    "recall@20": 50.8,
+    "MRR@10": 0.194
+  },
+  "hybrid_rrf_dense_plus_lexical": {
+    "recall@1": 13.5,
+    "recall@5": 36.9,
+    "recall@10": 48.5,
+    "recall@20": 62.9,
+    "MRR@10": 0.235
+  },
+  "eval_set": {
+    "queries": 423,
+    "distinct_gold_journals": 218,
+    "corpus_size": 1000,
+    "random_baseline_recall@10_pct": 1.0
+  }
+}

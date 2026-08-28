@@ -1,0 +1,9 @@
+{
+  "total_journals_in_openalex": 206266,
+  "corpus_size": 1000,
+  "fetch_seconds": 21.13,
+  "journals_missing_topics": 0,
+  "index_text_chars_median": 545,
+  "index_text_chars_p10": 498,
+  "index_text_chars_p90": 627
+}
