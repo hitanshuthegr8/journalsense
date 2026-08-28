@@ -115,10 +115,14 @@ def process_data(topic, start_year, end_year, limit=200):
     
     # NOTE: the OpenAlex parameter is `per-page` with a hyphen. This previously read
     # `per_page`, which the API ignores, so the page-size slider had no effect at all.
+    #
+    # `sort: publication_date:desc` was also removed. It returned only the newest N
+    # papers, so every one fell in the same year and the "trends over time" chart had
+    # a single bar. Without it OpenAlex sorts by relevance, giving a sample that
+    # actually spans the requested range.
     params = {
         'filter': f'title.search:{topic},publication_year:{start_year}-{end_year}',
         'per-page': min(limit, 100),  # OpenAlex caps page size at 100
-        'sort': 'publication_date:desc'
     }
 
     works_data = fetch_openalex_data('works', params)
@@ -143,9 +147,27 @@ def process_data(topic, start_year, end_year, limit=200):
     else:
         works_df['publication_year'] = works_df.get('publication_year', start_year)
     
-    # Publication trends data
-    pub_trends = works_df['publication_year'].value_counts().sort_index()
-    pub_trends_df = pd.DataFrame({'year': pub_trends.index, 'publications': pub_trends.values})
+    # Publication trends.
+    #
+    # Counted server-side with group_by rather than from the sampled page. group_by
+    # aggregates over EVERY matching work, so these are true totals per year rather
+    # than the shape of whichever 100 papers came back - a real trend line instead of
+    # an artefact of the page size.
+    trend_data = fetch_openalex_data('works', {
+        'filter': f'title.search:{topic},publication_year:{start_year}-{end_year}',
+        'group_by': 'publication_year',
+    })
+    groups = (trend_data or {}).get('group_by') or []
+    if groups:
+        rows = sorted(
+            ((int(g['key']), g['count']) for g in groups if str(g.get('key','')).isdigit()),
+            key=lambda kv: kv[0],
+        )
+        pub_trends_df = pd.DataFrame(rows, columns=['year', 'publications'])
+    else:
+        # Fall back to counting the sample, which is a weaker signal but still real.
+        pub_trends = works_df['publication_year'].value_counts().sort_index()
+        pub_trends_df = pd.DataFrame({'year': pub_trends.index, 'publications': pub_trends.values})
     
     # Citation metrics
     citation_data = works_df[['publication_year', 'cited_by_count']].copy() if 'cited_by_count' in works_df.columns else pd.DataFrame({
@@ -340,9 +362,74 @@ def main():
         </div>
         """, unsafe_allow_html=True)
     
+    # Publication and citation trends over time.
+    #
+    # process_data() has always computed 'publication_trends', 'citation_metrics' and
+    # 'open_access', but main() never rendered any of them - three of six datasets were
+    # calculated and thrown away, which left a "scholarly dashboard" with no time series
+    # on it at all. Rendered below.
+    st.markdown('<h2 class="section-header">Publication & Citation Trends</h2>', unsafe_allow_html=True)
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        trends = get_section(data, 'publication_trends')
+        if trends is None:
+            st.info("No publication counts were returned for these works.")
+        else:
+            fig = px.bar(
+                trends, x='year', y='publications',
+                title='Publications per Year',
+                labels={'year': 'Year', 'publications': 'Publications'},
+                template='plotly_white',
+            )
+            fig.update_xaxes(dtick=1)
+            st.plotly_chart(fig, use_container_width=True)
+            st.caption("Counted across every matching work in OpenAlex, not the sample below.")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with col2:
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        cites = get_section(data, 'citation_metrics')
+        if cites is None:
+            st.info("No citation counts were returned for these works.")
+        else:
+            fig = px.line(
+                cites, x='year', y='avg_citations', markers=True,
+                title='Average Citations per Paper by Year',
+                labels={'year': 'Year', 'avg_citations': 'Avg. citations'},
+                template='plotly_white',
+            )
+            fig.update_xaxes(dtick=1)
+            st.plotly_chart(fig, use_container_width=True)
+            st.caption(
+                f"From the {data['stats']['total_papers']} papers analysed. Recent years "
+                "trend lower because citations accrue over time, not because the work is "
+                "less cited."
+            )
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # Open access share
+    st.markdown('<h2 class="section-header">Open Access Share</h2>', unsafe_allow_html=True)
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    oa = get_section(data, 'open_access')
+    if oa is None:
+        st.info("OpenAlex returned no open-access information for these works.")
+    else:
+        fig_oa = px.bar(
+            oa, x='year', y='percentage',
+            title='Share of Publications that are Open Access (%)',
+            labels={'year': 'Year', 'percentage': '% open access'},
+            range_y=[0, 100], template='plotly_white',
+        )
+        fig_oa.update_xaxes(dtick=1)
+        st.plotly_chart(fig_oa, use_container_width=True)
+        st.caption(f"From the {data['stats']['total_papers']} papers analysed, not all of OpenAlex.")
+    st.markdown('</div>', unsafe_allow_html=True)
+
     # Institutions and Research Topics
     col1, col2 = st.columns(2)
-    
+
     with col1:
         st.markdown('<h2 class="section-header">Top Contributing Institutions</h2>', unsafe_allow_html=True)
         st.markdown('<div class="card">', unsafe_allow_html=True)

@@ -106,17 +106,21 @@ def extract_keywords_with_transformer(text, title="", model=None, n=20):
         n_gram_range = (1, 2)
         
         # Extract n-grams
-        count = 0
+        # NOTE: this loop used to bind `n`, shadowing the function's `n` parameter -
+        # the number of keywords to return. After the loop `n` was 2, so a request for
+        # 20 keywords returned 2. Renamed to `size`. The inner `break` also only exited
+        # the inner loop, so the 200-candidate cap never stopped the outer one.
         candidates = []
-        for n in range(n_gram_range[0], n_gram_range[1] + 1):
-            for i in range(0, len(words) - n + 1):
-                candidate = " ".join(words[i:i+n])
+        for size in range(n_gram_range[0], n_gram_range[1] + 1):
+            for i in range(0, len(words) - size + 1):
+                candidate = " ".join(words[i:i + size])
                 if len(candidate) > 3:  # Only include reasonably sized candidates
                     candidates.append(candidate)
-                    count += 1
-                if count >= 200:  # Limit the number of candidates
+                if len(candidates) >= 200:  # Limit the number of candidates
                     break
-        
+            if len(candidates) >= 200:
+                break
+
         # Remove duplicates and stopwords
         stop_words = set(stopwords.words('english'))
         candidates = [c for c in candidates if not all(w in stop_words for w in c.split())]
@@ -347,6 +351,22 @@ def get_work_details(work_id):
         st.error(f"API Request Error: {e}")
         return None
 
+def deinvert_abstract(inverted_index):
+    """Reconstruct abstract text from OpenAlex's inverted index.
+
+    OpenAlex does NOT return an `abstract` field on works - it returns
+    `abstract_inverted_index`, a {word: [positions]} map. This code previously read
+    work.get("abstract"), which is never present, so every paper reported
+    "No abstract available" and ALL keyword extraction silently degraded to the
+    title-only fallback path. The core feature of this page was running on titles.
+    """
+    if not inverted_index:
+        return "No abstract available"
+    positions = [(pos, word) for word, ps in inverted_index.items() for pos in ps]
+    positions.sort()
+    return " ".join(word for _, word in positions)
+
+
 def format_openalex_works(works_data):
     """Format OpenAlex API response into a pandas DataFrame"""
     if not works_data or 'results' not in works_data:
@@ -359,7 +379,7 @@ def format_openalex_works(works_data):
         work_info = {
             "id": work.get("id", ""),
             "title": work.get("title", "No title"),
-            "abstract": work.get("abstract", "No abstract available"),
+            "abstract": deinvert_abstract(work.get("abstract_inverted_index")),
             "publication_year": work.get("publication_year", None),
             "citation_count": work.get("cited_by_count", 0),
             "type": work.get("type", "unknown")
