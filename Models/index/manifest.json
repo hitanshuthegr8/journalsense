@@ -1,0 +1,8 @@
+{
+  "corpus_size": 1000,
+  "embedding_model": "allenai-specter",
+  "embedding_dim": 768,
+  "normalised": true,
+  "corpus_file": "eval/journals.json",
+  "corpus_sha256_16": "a45836d72f4aa92c"
+}

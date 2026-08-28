@@ -46,8 +46,14 @@ deleted.
 |---|---|
 | Cold query latency (p50 / p95) | `153.1 ms` / `188.9 ms` |
 | FAISS index scan alone (p50) | `0.1 ms` |
-| Index build, 1,000 journals | `80.1 s` (12.5 docs/sec) |
+| App cold start | `~20 s` (torch import + SPECTER load) |
+| Index load at startup | `7.8 ms` |
 | Embedding dimension | 768 |
+
+Embedding the 1,000 journals takes ~80 s, so it is done **offline** by
+`build_index.py` and the result is committed as a 2.9 MB artifact. It used to run
+inside the request handler, which made the first query of every cold process wait
+~150 s. Embedding a fixed corpus is a build step, not a request step.
 
 The index scan is **~0.1% of query time** — the SPECTER encoder dominates completely. That
 is why the index is an exact `IndexFlatIP` rather than an approximate one: at this corpus
@@ -81,13 +87,20 @@ Stated up front, because they bound what the numbers mean.
 ## How it works
 
 ```
-OpenAlex /sources  ──▶  document text        ──▶  SPECTER (768-d)  ──▶  FAISS
-type:journal            name | publisher |        sentence-             IndexFlatIP
-sort by citations       topics                    transformers          (exact cosine)
-                                                                             │
-query = title + abstract  ──▶  SPECTER  ──▶  L2-normalise  ──────────────────┘
-                                                     │
-                                    ranked journals + live OpenAlex metrics
+OFFLINE  ·  build_index.py                    ← run once, output committed
+  OpenAlex /sources ──▶ document text ──▶ SPECTER (768-d) ──▶ L2-normalise
+  type:journal          name | publisher                          │
+  sort by citations     | topics                                  ▼
+                                                    index/embeddings.npy (2.9 MB)
+                                                    index/manifest.json  (digest)
+
+SERVING  ·  model2.py
+  startup:  load embeddings.npy ──▶ FAISS IndexFlatIP     (7.8 ms)
+            verify manifest digest vs corpus              (fail loud on drift)
+                                                                │
+  request:  title + abstract ──▶ SPECTER ──▶ L2-normalise ──────┤
+                                                                ▼
+                                             search ──▶ filter ──▶ ranked journals
 ```
 
 - **SPECTER** (`allenai-specter`) — embeddings trained on citation relationships between
@@ -95,7 +108,8 @@ query = title + abstract  ──▶  SPECTER  ──▶  L2-normalise  ───
   right prior for "which venue publishes work like this".
 - **FAISS `IndexFlatIP`** — vectors are L2-normalised, so inner product *is* cosine
   similarity. Exact search, for the reason given above.
-- **Metrics are live OpenAlex values.** Nothing is synthesised.
+- **Metrics are real OpenAlex values** — a snapshot taken when the index was built,
+  which the UI states. Nothing is synthesised.
 
 ---
 
@@ -105,9 +119,11 @@ query = title + abstract  ──▶  SPECTER  ──▶  L2-normalise  ───
 cd Models
 python -m venv venv && source venv/bin/activate   # Windows: venv\Scripts\activate
 pip install -r requirements.txt
-cp ../.env.example ../.env                        # then set OPENALEX_MAILTO
 streamlit run model2.py
 ```
+
+The corpus and its embeddings ship with the repo, so there is no build step and no API
+key to configure. `build_index.py` regenerates them if you change the corpus.
 
 Full instructions, including the other two Streamlit tools, in
 [`SETUP_GUIDE.md`](SETUP_GUIDE.md). Architecture and known issues in
@@ -134,6 +150,7 @@ numbers without erroring. `verify_fixture.py` exists to make that failure loud.
 | Path | What |
 |---|---|
 | `Models/model2.py` | The recommender (Streamlit) |
+| `Models/build_index.py` | Offline embedding build → `Models/index/` |
 | `Models/eval/` | Benchmark harness, eval set, pinned corpus fixture |
 | `Models/dashboard.py` | Bibliometric charts for a topic (standalone tool) |
 | `Models/keywordFinder.py` | Paper search + keyword extraction (standalone tool) |

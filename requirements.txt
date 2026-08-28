@@ -1,0 +1,4 @@
+# Streamlit Community Cloud and Hugging Face Spaces look for requirements.txt at the
+# repository root. The actual pins live with the code they belong to, so this just
+# points there rather than duplicating a list that would drift.
+-r Models/requirements.txt

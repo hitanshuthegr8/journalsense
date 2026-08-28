@@ -6,25 +6,27 @@ FAISS IndexFlatIP so inner product == cosine similarity. Exact search is used
 deliberately: at 1k vectors the index scan is ~0.1 ms of a ~153 ms query, so an
 ANN index would trade recall for time we aren't spending. See Models/eval/.
 
-All journal metrics shown are real OpenAlex values. Nothing is synthesised.
+The corpus and its embeddings are built OFFLINE by build_index.py and loaded at
+startup. Nothing is fetched or encoded per request except the user's own query.
+
+All journal metrics are real OpenAlex values - a snapshot from index build time,
+not live. Nothing is synthesised.
 """
+
+import hashlib
+import json
+from pathlib import Path
 
 import faiss
 import numpy as np
-import requests
 import streamlit as st
 from sentence_transformers import SentenceTransformer
 from sklearn.feature_extraction.text import CountVectorizer
 
-OPENALEX_SOURCES = "https://api.openalex.org/sources"
 
-# Only the fields we actually use - keeps payloads small and fetches fast.
-SOURCE_FIELDS = ",".join([
-    "id", "display_name", "alternate_titles", "issn_l", "type",
-    "works_count", "cited_by_count", "homepage_url",
-    "host_organization_name", "topics", "summary_stats",
-    "is_in_doaj", "is_oa", "is_core",
-])
+HERE = Path(__file__).parent
+CORPUS_PATH = HERE / "eval" / "journals.json"
+INDEX_DIR = HERE / "index"
 
 
 # ------------------------------------------------------------------
@@ -35,62 +37,44 @@ def load_embedder():
 
 
 # ------------------------------------------------------------------
-# 3. Fetch journal metadata
+# 3. Load the corpus and its precomputed embeddings
 #
-# NOTE: OpenAlex removed `description` and `abbreviated_title` from source
-# records - they were empty for 100% of 1,000 sampled journals, which meant the
-# index was silently embedding titles alone. Topical scope now comes from the
-# `topics` field instead. `type:journal` excludes repositories and aggregators
-# (Zenodo, Figshare, PubMed) that pollute the default listing.
-@st.cache_data(show_spinner=False, ttl=3600)
-def fetch_openalex_journals(target: int = 1000, per_page: int = 200):
-    journals, cursor = [], "*"
-    try:
-        while len(journals) < target:
-            resp = requests.get(OPENALEX_SOURCES, timeout=30, params={
-                "filter": "type:journal",
-                "sort": "cited_by_count:desc",
-                "per-page": per_page,
-                "cursor": cursor,
-                "select": SOURCE_FIELDS,
-            })
-            if resp.status_code != 200:
-                st.warning(f"OpenAlex API error: {resp.status_code}")
-                break
-            data = resp.json()
-            journals.extend(data.get("results", []))
-            cursor = data.get("meta", {}).get("next_cursor")
-            if not cursor:
-                break
-        return journals[:target]
-    except requests.exceptions.Timeout:
-        st.error(f"OpenAlex timed out after 30s with {len(journals)} journals fetched.")
-        return []
-    except requests.exceptions.RequestException as e:
-        st.error(f"Network error contacting OpenAlex ({type(e).__name__}): {e}")
-        return []
-    except ValueError as e:
-        # requests raises ValueError from .json() on a malformed body.
-        st.error(f"OpenAlex returned a response that is not valid JSON: {e}")
-        return []
+# This used to fetch 1,000 journals from OpenAlex and embed all of them inside the
+# button handler: ~16s of network plus ~80s of encoding on every cold process. That
+# is a build step, not a request step - see build_index.py. The app now ships with
+# the corpus and its embeddings and just loads them.
+#
+# Consequence worth being explicit about: journal metrics are a SNAPSHOT taken when
+# the index was built, not live values. The UI says so.
+@st.cache_resource(show_spinner=False)
+def load_corpus_and_embeddings():
+    if not CORPUS_PATH.exists():
+        st.error(f"Corpus fixture missing: {CORPUS_PATH}")
+        return None, None, None
+    emb_path, man_path = INDEX_DIR / "embeddings.npy", INDEX_DIR / "manifest.json"
+    if not emb_path.exists() or not man_path.exists():
+        st.error("Prebuilt index missing. Run `python build_index.py` first.")
+        return None, None, None
 
+    journals = json.loads(CORPUS_PATH.read_text(encoding="utf-8"))
+    embs = np.load(emb_path).astype(np.float32)
+    manifest = json.loads(man_path.read_text(encoding="utf-8"))
 
-def journal_index_text(j: dict) -> str:
-    """The string that actually gets embedded: identity + topical scope.
+    # The embeddings are positionally aligned to the corpus. If the corpus changed
+    # without a rebuild, every row would point at the wrong journal and the app
+    # would return confidently wrong results - so fail loudly instead.
+    digest = hashlib.sha256(CORPUS_PATH.read_bytes()).hexdigest()[:16]
+    if digest != manifest.get("corpus_sha256_16"):
+        st.error(
+            "Index is stale: the corpus has changed since the embeddings were built. "
+            "Re-run `python build_index.py`."
+        )
+        return None, None, None
+    if len(journals) != embs.shape[0]:
+        st.error(f"Corpus has {len(journals)} journals but index has {embs.shape[0]} rows.")
+        return None, None, None
 
-    Raised Recall@10 from 39.2% to 51.1% on a 423-query eval set versus the
-    previous title-only text (see Models/eval/results.json).
-    """
-    parts = [j["display_name"]]
-    alts = (j.get("alternate_titles") or [])[:2]
-    if alts:
-        parts.append(" / ".join(alts))
-    if j.get("host_organization_name"):
-        parts.append(j["host_organization_name"])
-    topics = [t["display_name"] for t in (j.get("topics") or [])[:12]]
-    if topics:
-        parts.append("Publishes research on: " + "; ".join(topics))
-    return " | ".join(parts)
+    return journals, embs, manifest
 
 
 # ------------------------------------------------------------------
@@ -114,19 +98,14 @@ def extract_journal_domains(journals) -> list:
 
 
 # ------------------------------------------------------------------
-# 5. FAISS index over journal embeddings
+# 5. FAISS index from the precomputed embeddings
+#
+# Adding 1,000 pre-normalised vectors to a flat index is sub-millisecond. The
+# expensive part - encoding them - happened offline in build_index.py.
 @st.cache_resource(show_spinner=False)
-def build_faiss_index(journals, _model):
-    texts = [journal_index_text(j) for j in journals]
-    if not texts:
-        st.error("No journals available to index")
-        return faiss.IndexFlatIP(768)
-
-    embs = _model.encode(texts, batch_size=32, convert_to_numpy=True, show_progress_bar=False)
-    embs = np.asarray(embs, dtype=np.float32)
-    faiss.normalize_L2(embs)                 # so inner product == cosine
-    index = faiss.IndexFlatIP(embs.shape[1])
-    index.add(embs)
+def build_faiss_index(_embs):
+    index = faiss.IndexFlatIP(_embs.shape[1])
+    index.add(_embs)                          # already L2-normalised at build time
     return index
 
 
@@ -220,12 +199,20 @@ def main():
     st.title("AI Journal Recommender")
     st.write("Paste your paper title and abstract, then hit **Suggest Journals**.")
 
-    with st.spinner("Loading journal database..."):
-        journals = fetch_openalex_journals()
-    if not journals:
-        st.error("Could not load journals from OpenAlex. Try again shortly.")
+    # Both loads happen at page load, not on the button press. They are cached for the
+    # life of the process, so the cost is paid once at startup rather than being charged
+    # to whoever clicks first.
+    with st.spinner("Loading index..."):
+        journals, embs, manifest = load_corpus_and_embeddings()
+    if journals is None:
         return
-    st.caption(f"Indexing {len(journals):,} journals ranked by citation impact (OpenAlex).")
+    with st.spinner("Loading embedding model (first run downloads ~440 MB)..."):
+        embedder = load_embedder()
+    index = build_faiss_index(embs)
+    st.caption(
+        f"Searching {len(journals):,} OpenAlex journals ranked by citation impact. "
+        f"Metrics are a snapshot from when the index was built, not live values."
+    )
 
     st.sidebar.header("Filters")
     selected_domains = st.sidebar.multiselect("Research Domains", extract_journal_domains(journals))
@@ -244,15 +231,11 @@ def main():
         return
 
     query = f"{title} {abstract}"
-    embedder = load_embedder()
 
     with st.spinner("Extracting key topics..."):
         phrases = extract_key_phrases(query)
     st.subheader("Key Topics")
     st.write(" - ".join(phrases) or "N/A")
-
-    with st.spinner("Building recommendation index..."):
-        index = build_faiss_index(journals, embedder)
 
     recs = recommend_journals(query, journals, index, embedder, selected_domains, top_k=30)
     if not recs:

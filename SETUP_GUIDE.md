@@ -50,6 +50,9 @@ Set `OPENALEX_MAILTO` to your email. OpenAlex uses it to put your requests in th
 pool", which gets better rate limits. It is not a secret. If you leave it unset the apps
 still work — they just omit the parameter rather than sending a fake address.
 
+Only `dashboard.py` and `keywordFinder.py` call OpenAlex at runtime. The recommender
+(`model2.py`) ships with its corpus and makes no network calls at all.
+
 ### 4. Run an app
 
 ```bash
@@ -64,11 +67,23 @@ streamlit run model2.py
 
 Default port is `8501`. Use `--server.port 8502` to change it.
 
-> **First run is slow.** The SPECTER model downloads (~440 MB) and loads in ~52 s, then the
-> FAISS index builds in ~80 s. Both are cached for the life of the process, so subsequent
-> queries are fast — but note that the index build currently happens *inside* the request
-> handler, so the first query after a cold start pays the whole cost. Moving it to an
-> offline build step is the next phase of work.
+> **First run downloads SPECTER (~440 MB).** After that, cold start is ~20 s: importing
+> torch, then loading the model. The journal index itself loads in under 10 ms because the
+> embeddings are precomputed and committed — see `build_index.py`.
+
+### Rebuilding the index
+
+Only needed if you change the corpus:
+
+```bash
+python build_index.py
+```
+
+This embeds all 1,000 journals (~80 s) and writes `Models/index/embeddings.npy` plus a
+manifest recording the model, dimension, and a digest of the corpus file. The app checks
+that digest at startup and refuses to run against a stale index, because the embeddings are
+positionally aligned to `eval/journals.json` — a mismatch would return confidently wrong
+results rather than erroring.
 
 ---
 
